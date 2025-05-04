@@ -218,7 +218,7 @@ def handler(event, context):
             body = {
                 'bucket': outputBucket,
                 'key': encrypted_key,
-                's3_path': ['s3://' + outputBucket + '/' + encrypted_key]
+                's3_path': ['/' + outputBucket + '/' + encrypted_key]
             }
 
             statusCode = 200
