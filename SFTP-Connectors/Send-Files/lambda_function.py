@@ -132,6 +132,12 @@ def handler(event, context):
     pgpDetails = get_secret_details(pgpSecret, pgpKeyType)
     PGPPublicKey = pgpDetails['PGPKey']
 
+    # Fix escaped newlines in the PGP key
+    if '\\n' in PGPPublicKey:
+        print("Found escaped newlines in PGP key, converting to actual newlines")
+        PGPPublicKey = PGPPublicKey.replace('\\n', '\n')
+        print("Converted escaped newlines in PGP key")
+
     # Import PGP public key into keyring
     print('Trying importing PGP public key')
 
