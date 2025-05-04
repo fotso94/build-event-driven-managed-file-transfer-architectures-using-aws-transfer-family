@@ -143,7 +143,7 @@ def handler(event, _):
     wipe_tmp_directory()
 
     # Set GNUPG home directory and point to where the binary is stored.
-    gpg = gnupg.GPG(gnupghome='/tmp', gpgbinary='/bin/gpg')
+    gpg = gnupg.GPG(homedir='/tmp', gpgbinary='/bin/gpg')
     print("GPG binary initialized successfully")
 
     # Get PGP key from Secrets Manager
@@ -158,11 +158,28 @@ def handler(event, _):
 
     # Import PGP public key into keyring
     print('Trying importing PGP public key')
+    # Print first few characters of the key for debugging (avoid printing the entire key for security)
+    key_preview = PGPPublicKey[:30] + "..." if len(PGPPublicKey) > 30 else PGPPublicKey
+    print(f"PGP Key preview: {key_preview}")
+
+    # Check if the key starts with the expected PGP public key header
+    if not PGPPublicKey.strip().startswith('-----BEGIN PGP PUBLIC KEY BLOCK-----'):
+        error_msg = "PGP key does not appear to be in the correct format. Expected a PGP public key block."
+        print(error_msg)
+        return {
+            'statusCode': 500,
+            'body': {
+                'errorMessage': error_msg
+            }
+        }
+
+    # Import the key and get detailed results
     import_result = gpg.import_keys(PGPPublicKey)
+    print(f"Import result: {import_result.summary()}")
 
     # Check if import was successful and fingerprints are available
     if not import_result.fingerprints:
-        error_msg = "PGP key import failed or no valid fingerprints found"
+        error_msg = f"PGP key import failed or no valid fingerprints found. Results: {import_result.results}"
         print(error_msg)
         return {
             'statusCode': 500,
