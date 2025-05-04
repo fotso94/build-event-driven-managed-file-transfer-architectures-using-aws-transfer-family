@@ -22,54 +22,38 @@ def get_secret_details(secretArn, pgpKeyType):
            )
         # Create dictionary
         secret = response['SecretString']
-        if secret is None:
-            error_msg = "Secrets Manager returned empty secret"
-            print(error_msg)
-            return {
-                'statusCode': 500,
-                'body': {
-                    "errorMessage": error_msg
+        if secret != None:
+            secret_dict = json.loads(secret)
+        else:
+            print("Secrets Manager exception thrown")
+            statusCode = 500
+            body = {
+                    "errorMessage": "Secrets Manager exception thrown"
                 }
-            }
-
-        secret_dict = json.loads(secret)
-
         if pgpKeyType in secret_dict:
             PGPKey = secret_dict[pgpKeyType]
-            return {
-                "PGPKey": PGPKey,
-                "statusCode": 200
-            }
+            statusCode = 200
         else:
-            error_msg = f"{pgpKeyType} not found in secret"
-            print(error_msg)
-            return {
-                'statusCode': 500,
-                'body': {
-                    "errorMessage": error_msg
-                }
+            print(f"{pgpKeyType} not found in secret")
+            statusCode = 500
+            body = {
+                "errorMessage": f"{pgpKeyType} not found in secret"
+            }
+        return {
+            "PGPKey": PGPKey
             }
     except ClientError as e:
         print(json.dumps(e.response))
         statusCode = e.response['ResponseMetadata']['HTTPStatusCode']
         errorCode = e.response['Error']['Code']
         errorMessage = e.response['Error']['Message']
-        print(f"Secrets Manager error: {errorCode} - {errorMessage}")
+        body = {
+             "errorCode": errorCode,
+             "errorMessage": errorMessage
+        }
         return {
             'statusCode': statusCode,
-            'body': {
-                "errorCode": errorCode,
-                "errorMessage": errorMessage
-            }
-        }
-    except Exception as e:
-        error_msg = f"Unexpected error retrieving secret: {str(e)}"
-        print(error_msg)
-        return {
-            'statusCode': 500,
-            'body': {
-                "errorMessage": error_msg
-            }
+            'body': body
         }
 
 
@@ -91,26 +75,24 @@ def downloadfile(bucketname, key, filename):
         return False
 
 # Function that performs PGP encryption
-def encrypt_file(input_file, output_file, fingerprints):
+def encrypt_file(input_file, output_file, recipient):
     # Configure GPG binary to work with lambda
     gpg = gnupg.GPG(homedir='/tmp', gpgbinary='/bin/gpg')
     # Encrypt file
-    encrypted_file = gpg.encrypt_file(input_file, recipients=fingerprints, output=output_file)
+    encrypted_file = gpg.encrypt_file(local_file_name,recipients= import_result.fingerprints, output=output_file)
 
-    # If encryption fails, return stderr message
-    if not encrypted_file.ok:
-        raise Exception(f"Error encrypting file: {encrypted_file.stderr}")
-
-    return encrypted_file
+    # If encryption fails,return stderr message
+    if encrypted_file.status != 0:
+        raise Exception("Error encrypting file: {}".format(encrypted_file.stderr))
 
 # Function that wipes /tmp directory clean
 def wipe_tmp_directory():
-  for root, _, files in os.walk("/tmp"):
+  for root, dirs, files in os.walk("/tmp"):
     for file in files:
       os.remove(os.path.join(root, file))
 
 # Lambda handler
-def handler(event, _):
+def handler(event, context):
 
     print(json.dumps(event))
 
@@ -143,43 +125,32 @@ def handler(event, _):
     wipe_tmp_directory()
 
     # Set GNUPG home directory and point to where the binary is stored.
-    gpg = gnupg.GPG(homedir='/tmp', gpgbinary='/bin/gpg')
+    gpg = gnupg.GPG(gnupghome='/tmp', gpgbinary='/bin/gpg')
     print("GPG binary initialized successfully")
 
     # Get PGP key from Secrets Manager
     pgpDetails = get_secret_details(pgpSecret, pgpKeyType)
-
-    # Check if there was an error retrieving the secret
-    if 'statusCode' in pgpDetails and pgpDetails['statusCode'] != 200:
-        print("Error retrieving PGP key from Secrets Manager")
-        return pgpDetails
-
     PGPPublicKey = pgpDetails['PGPKey']
 
     # Import PGP public key into keyring
     print('Trying importing PGP public key')
+
     # Print first few characters of the key for debugging (avoid printing the entire key for security)
     key_preview = PGPPublicKey[:30] + "..." if len(PGPPublicKey) > 30 else PGPPublicKey
     print(f"PGP Key preview: {key_preview}")
 
-    # Check if the key starts with the expected PGP public key header
-    if not PGPPublicKey.strip().startswith('-----BEGIN PGP PUBLIC KEY BLOCK-----'):
-        error_msg = "PGP key does not appear to be in the correct format. Expected a PGP public key block."
-        print(error_msg)
-        return {
-            'statusCode': 500,
-            'body': {
-                'errorMessage': error_msg
-            }
-        }
-
-    # Import the key and get detailed results
+    # Import the key
     import_result = gpg.import_keys(PGPPublicKey)
-    print(f"Import result: {import_result.summary()}")
+
+    # Print detailed import results
+    print(f"Import result summary: {import_result.summary()}")
+    print(f"Import count: {import_result.count}")
+    print(f"Import fingerprints: {import_result.fingerprints}")
+    print(f"Import results: {import_result.results}")
 
     # Check if import was successful and fingerprints are available
     if not import_result.fingerprints:
-        error_msg = f"PGP key import failed or no valid fingerprints found. Results: {import_result.results}"
+        error_msg = "PGP key import failed - no valid fingerprints found"
         print(error_msg)
         return {
             'statusCode': 500,
@@ -188,7 +159,7 @@ def handler(event, _):
             }
         }
 
-    print(f"PGP Public Key imported successfully. Fingerprints: {import_result.fingerprints}")
+    print(f"PGP Public Key imported successfully. Using fingerprints: {import_result.fingerprints}")
 
     # Download unencrypted file from S3
     try:
@@ -201,15 +172,16 @@ def handler(event, _):
 
             # Perform PGP encryption
             print(f"Encrypting file with recipients: {import_result.fingerprints}")
-            try:
-                status = encrypt_file(local_file_name, output_file, import_result.fingerprints)
+            status = gpg.encrypt_file(local_file_name, recipients=import_result.fingerprints, output=output_file)
 
-                # Print encryption status information to logs
-                print("ok: ", status.ok)
-                print("status: ", status.status)
-                print("stderr: ", status.stderr)
-            except Exception as e:
-                error_msg = str(e)
+            # Print encryption status information to logs
+            print("ok: ", status.ok)
+            print("status: ", status.status)
+            print("stderr: ", status.stderr)
+
+            # Check if encryption was successful
+            if not status.ok:
+                error_msg = f"Encryption failed: {status.stderr}"
                 print(error_msg)
                 return {
                     'statusCode': 500,
